@@ -1,0 +1,10 @@
+{
+	"name": "download-images-in-element",
+	"private": true,
+	"version": "1.0.0.0",
+	"scripts": {
+		"lint": "web-ext lint",
+		"start": "web-ext run",
+		"build": "web-ext build"
+	}
+}
