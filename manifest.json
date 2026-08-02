@@ -1,7 +1,7 @@
 {
 	"manifest_version": 2,
 	"name": "Download Images in Element",
-	"version": "1.0.0.0",
+	"version": "1.0.1.0",
 	"description": "Pick an element and download the images inside it as a ZIP archive.",
 	"icons": {
 		"512": "icons/icon-512.png"

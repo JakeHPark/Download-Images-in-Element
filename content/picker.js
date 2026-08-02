@@ -170,6 +170,101 @@
 		});
 	}
 
+	const EXTENSION_FETCH = globalThis.fetch.bind(globalThis);
+
+	const PAGE_FETCH =
+		typeof content !== "undefined" && typeof content.fetch === "function"
+			? content.fetch.bind(content)
+			: null;
+
+	const FETCH_OPTIONS = Object.freeze({
+		credentials: "include",
+		redirect: "follow",
+		cache: "default",
+	});
+
+	function isProbablyAuthFailure(response, contentType) {
+		return (
+			response.status === 401 ||
+			response.status === 403 ||
+			response.status === 407 ||
+			response.status === 429 ||
+			contentType === "text/html" ||
+			/\/cdn-cgi\/(?:access|challenge-platform)\//i.test(response.url || "")
+		);
+	}
+
+	async function fetchImage(url) {
+		const target = new URL(url);
+		const isHttp = target.protocol === "http:" || target.protocol === "https:";
+		const sameOrigin = target.origin === location.origin;
+
+		/*
+		 * Same-origin authenticated resources should use the page request
+		 * context first. Cross-origin resources should use the extension's
+		 * elevated host permissions first, because page fetch is CORS-bound.
+		 */
+		const attempts = [];
+
+		if (isHttp && sameOrigin && PAGE_FETCH) {
+			attempts.push(["page", PAGE_FETCH]);
+		}
+
+		attempts.push(["extension", EXTENSION_FETCH]);
+
+		if (isHttp && !sameOrigin && PAGE_FETCH) {
+			attempts.push(["page", PAGE_FETCH]);
+		}
+
+		let lastError = new Error("No request method available");
+
+		for (const [mode, fetchFn] of attempts) {
+			let response;
+
+			try {
+				response = await fetchFn(url, FETCH_OPTIONS);
+			} catch (error) {
+				lastError = new Error(
+					`[${mode}] ${error instanceof Error ? error.message : String(error)}`,
+				);
+				continue;
+			}
+
+			const contentType = normalizeMimeType(
+				response.headers.get("content-type"),
+			);
+
+			if (response.ok && contentType !== "text/html") {
+				return {
+					response,
+					contentType,
+					requestMode: mode,
+				};
+			}
+
+			lastError = new Error(
+				[
+					`[${mode}] HTTP ${response.status}`,
+					contentType || "unknown content type",
+					response.redirected ? "redirected" : "",
+					`final URL: ${response.url || url}`,
+				]
+					.filter(Boolean)
+					.join("; "),
+			);
+
+			/*
+			 * Do not retry an ordinary 404 through a different context.
+			 * Retry only where authentication/challenge semantics may matter.
+			 */
+			if (!isProbablyAuthFailure(response, contentType)) {
+				break;
+			}
+		}
+
+		throw lastError;
+	}
+
 	async function packageImages(root) {
 		const toast = showToast("Scanning element…");
 
@@ -188,17 +283,10 @@
 			let completed = 0;
 			const fetched = await mapPool(sources, 4, async (source, index) => {
 				try {
-					const response = await fetch(source.url, {
-						credentials: "include",
-						redirect: "follow",
-						cache: "default",
-					});
+					const { response, contentType } = await fetchImage(source.url);
 
 					if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-					const contentType = normalizeMimeType(
-						response.headers.get("content-type"),
-					);
 					if (contentType === "text/html") {
 						throw new Error(
 							"Server returned HTML, probably a login or error page",
