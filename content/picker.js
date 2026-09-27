@@ -95,7 +95,7 @@
 			event.stopPropagation();
 			event.stopImmediatePropagation();
 			stopPicker();
-			void packageImages(selected);
+			void packageMedia(selected);
 		};
 
 		const onKeyDown = (event) => {
@@ -194,7 +194,7 @@
 		);
 	}
 
-	async function fetchImage(url) {
+	async function fetchMedia(url) {
 		const target = new URL(url);
 		const isHttp = target.protocol === "http:" || target.protocol === "https:";
 		const sameOrigin = target.origin === location.origin;
@@ -265,25 +265,32 @@
 		throw lastError;
 	}
 
-	async function packageImages(root) {
+	async function packageMedia(root) {
 		const toast = showToast("Scanning element…");
 
 		try {
-			const sources = collectImageSources(root);
+			const imageSources = collectImageSources(root);
+			const videoSources = collectVideoSources(root);
+			const acceptedVideoSources =
+				videoSources.length > 0 && (await confirmVideos(videoSources.length))
+					? videoSources
+					: [];
+			const sources = [...imageSources, ...acceptedVideoSources];
+
 			if (sources.length === 0) {
-				toast.set("No image sources found in that element.");
+				toast.set("No media sources selected in that element.");
 				toast.dismissAfter(2500);
 				return;
 			}
 
 			toast.set(
-				`Found ${sources.length} image${sources.length === 1 ? "" : "s"}. Fetching…`,
+				`Found ${describeCounts(imageSources.length, acceptedVideoSources.length)}. Fetching…`,
 			);
 
 			let completed = 0;
 			const fetched = await mapPool(sources, 4, async (source, index) => {
 				try {
-					const { response, contentType } = await fetchImage(source.url);
+					const { response, contentType } = await fetchMedia(source.url);
 
 					if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -311,7 +318,7 @@
 					};
 				} finally {
 					completed += 1;
-					toast.set(`Fetching images… ${completed}/${sources.length}`);
+					toast.set(`Fetching media… ${completed}/${sources.length}`);
 				}
 			});
 
@@ -336,14 +343,14 @@
 				entries.push({
 					name: "_failures.txt",
 					bytes: new TextEncoder().encode(
-						["Some image requests failed.", "", ...failures, ""].join("\n"),
+						["Some media requests failed.", "", ...failures, ""].join("\n"),
 					),
 					mtime: new Date(),
 				});
 			}
 
 			if (entries.length === 0) {
-				toast.set("Every image request failed.");
+				toast.set("Every media request failed.");
 				toast.dismissAfter(3500);
 				return;
 			}
@@ -357,13 +364,13 @@
 
 			const successCount = fetched.filter((item) => item.ok).length;
 			toast.set(
-				`Handed ${successCount} image${successCount === 1 ? "" : "s"} to Firefox as a ZIP.`,
+				`Handed ${successCount} file${successCount === 1 ? "" : "s"} to Firefox as a ZIP.`,
 			);
 			toast.dismissAfter(3000);
 		} catch (error) {
-			console.error("Image ZIP failed:", error);
+			console.error("Media ZIP failed:", error);
 			toast.set(
-				`Image ZIP failed: ${error instanceof Error ? error.message : String(error)}`,
+				`Media ZIP failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			toast.dismissAfter(5000);
 		}
@@ -388,6 +395,7 @@
 			byUrl.set(url, {
 				url,
 				hint: sanitizeNamePart(hint),
+				kind: "image",
 			});
 		};
 
@@ -456,6 +464,147 @@
 		}
 
 		return [...byUrl.values()];
+	}
+
+	function collectVideoSources(root) {
+		const byUrl = new Map();
+		let visited = 0;
+		const MAX_ELEMENTS = 15000;
+
+		const add = (rawUrl, hint = "") => {
+			const url = absolutizeUrl(rawUrl);
+			if (!url || byUrl.has(url)) {
+				return false;
+			}
+
+			byUrl.set(url, {
+				url,
+				hint: sanitizeNamePart(hint),
+				kind: "video",
+			});
+			return true;
+		};
+
+		for (const element of walkElements(root)) {
+			visited += 1;
+			if (visited > MAX_ELEMENTS) break;
+
+			const tag = element.localName;
+
+			if (tag === "video") {
+				const hint = element.title || element.id || "video";
+				const candidates = [
+					element.currentSrc,
+					element.getAttribute("src"),
+					element.getAttribute("data-src"),
+					element.getAttribute("data-original"),
+					element.getAttribute("data-lazy-src"),
+					element.getAttribute("data-url"),
+				];
+
+				for (const source of element.querySelectorAll("source")) {
+					if (source.type && !/^video\//i.test(source.type)) {
+						continue;
+					}
+					candidates.push(
+						source.getAttribute("src"),
+						source.getAttribute("data-src"),
+					);
+				}
+
+				for (const candidate of candidates) {
+					if (add(candidate, hint)) {
+						break;
+					}
+				}
+			}
+		}
+
+		return [...byUrl.values()];
+	}
+
+	function describeCounts(imageCount, videoCount) {
+		const parts = [];
+		if (imageCount > 0) {
+			parts.push(`${imageCount} image${imageCount === 1 ? "" : "s"}`);
+		}
+		if (videoCount > 0) {
+			parts.push(`${videoCount} video${videoCount === 1 ? "" : "s"}`);
+		}
+		return parts.join(" and ") || "0 files";
+	}
+
+	function confirmVideos(count) {
+		return new Promise((resolve) => {
+			let done = false;
+			const panel = document.createElement("div");
+			markUi(panel);
+			Object.assign(panel.style, {
+				position: "fixed",
+				zIndex: "2147483647",
+				left: "50%",
+				top: "12px",
+				transform: "translateX(-50%)",
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				flexWrap: "wrap",
+				gap: "10px",
+				maxWidth: "calc(100vw - 24px)",
+				padding: "10px 12px",
+				borderRadius: "10px",
+				color: "#fff",
+				background: "rgba(24,24,24,.95)",
+				boxShadow: "0 5px 24px rgba(0,0,0,.35)",
+				font: "600 14px/1.25 system-ui,sans-serif",
+			});
+
+			const label = document.createElement("span");
+			label.textContent = `Download ${count} video${count === 1 ? "" : "s"} in this element?`;
+
+			const yes = makePromptButton("Yes", true);
+			const no = makePromptButton("No", false);
+			panel.append(label, yes, no);
+			document.documentElement.append(panel);
+
+			const finish = (value) => {
+				if (done) return;
+				done = true;
+				window.removeEventListener("keydown", onKeyDown, true);
+				panel.remove();
+				resolve(value);
+			};
+
+			const onKeyDown = (event) => {
+				if (event.key === "Escape") {
+					event.preventDefault();
+					finish(false);
+				}
+			};
+
+			yes.addEventListener("click", () => finish(true), { once: true });
+			no.addEventListener("click", () => finish(false), { once: true });
+			window.addEventListener("keydown", onKeyDown, true);
+		});
+	}
+
+	function makePromptButton(text, primary) {
+		const button = document.createElement("button");
+		markUi(button);
+		button.type = "button";
+		button.textContent = text;
+		Object.assign(button.style, {
+			appearance: "none",
+			border: primary ? "1px solid #ff4d00" : "1px solid rgba(255,255,255,.45)",
+			borderRadius: "7px",
+			padding: "6px 10px",
+			color: "#fff",
+			background: primary ? "#ff4d00" : "transparent",
+			font: "inherit",
+			cursor: "pointer",
+			pointerEvents: "auto",
+		});
+		return button;
 	}
 
 	function* walkElements(root) {
@@ -609,7 +758,7 @@
 			return ensureExtension(fromUrl, result.contentType);
 		}
 		return ensureExtension(
-			result.source.hint || `image-${result.index + 1}`,
+			result.source.hint || `${result.source.kind || "file"}-${result.index + 1}`,
 			result.contentType,
 		);
 	}
@@ -664,6 +813,19 @@
 				"image/tiff": "tif",
 				"image/webp": "webp",
 				"image/x-icon": "ico",
+				"application/vnd.apple.mpegurl": "m3u8",
+				"application/x-mpegurl": "m3u8",
+				"video/3gpp": "3gp",
+				"video/mp2t": "ts",
+				"video/mp4": "mp4",
+				"video/mpeg": "mpeg",
+				"video/ogg": "ogv",
+				"video/quicktime": "mov",
+				"video/webm": "webm",
+				"video/x-flv": "flv",
+				"video/x-m4v": "m4v",
+				"video/x-matroska": "mkv",
+				"video/x-ms-wmv": "wmv",
 			}[contentType] || ""
 		);
 	}
